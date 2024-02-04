@@ -10,6 +10,8 @@ const bot = new Telegraf(BOT_TOKEN);
 
 //Variables globales
 let cineSeleccionadoGlobal = null
+let movieData = {}
+let peliculasDisponibles = []
 
 // FUNCIONES A MOVER
 function removeTextSigns(text) {
@@ -18,13 +20,15 @@ function removeTextSigns(text) {
   return modifiedText
 }
 
-// PUPPETEER PARA CINESA PVENECIA (MOVER A FICHERO A PARTE)
-async function clickSeeMoreButtons() {
+// PUPPETEER PARA CINESA PVENECIA (MOVER A FICHERO APARTE)
+async function clickSeeMoreButtons(ctx) {
   const browser = await puppeteer.launch();
   const page = await browser.newPage();
+  console.log(ctx.match[0])
+  const cineId = ctx.match[0] === 'pvenecia' ? '530' : '300'
 
   // Navegar a la página
-  await page.goto('https://www.filmaffinity.com/es/theater-showtimes.php?id=530', {waitUntil: 'load'});
+  await page.goto(`https://www.filmaffinity.com/es/theater-showtimes.php?id=${cineId}`, {waitUntil: 'load'});
   // Aceptamos las cookies
   const acceptCookiesButton = await page.$('[class=" css-v43ltw"]')
   if (acceptCookiesButton) {
@@ -43,38 +47,66 @@ async function clickSeeMoreButtons() {
   const updatedHTML = await page.content()
 
   // Usar Cheerio para analizar el HTML actualizado
+  
+
   const $ = cheerio.load(updatedHTML)
-  let titles = $('.mv-title')
+
+  let titles = $('.movie-showtimes-n');
   titles.each((index, element) => {
-    // Obtener todos los nodos hijos, incluidos elementos y nodos de texto
-    const childNodes = $(element).contents()
-  
-    // Filtrar los nodos de texto
-    const textNodes = childNodes.filter(function() {
-      return this.nodeType === 3; // Node.TEXT_NODE
-    })
-  
-    // Recorrer los nodos de texto y mostrar su contenido
-    textNodes.each((index, textNode) => {
-      const textContent = textNode.nodeValue.trim();
-      if (textContent !== "") {
-        console.log(textContent);
-      }
+    // Para cada elemento con clase .movie-showtimes-n, buscar los nodos de texto directos dentro de él
+    let titleNode = $(element).find('.mv-title').contents().filter(function() {
+        return this.nodeType === 3 && $(this).text().trim().length > 0;
+    });
+
+    // Obtener el texto del título y limpiarlo
+    let title = $(titleNode[0]).text().trim();
+
+    // Inicializar el objeto de sesiones para este título
+    movieData[title] = {};
+
+    // Buscar los elementos li con el atributo data-sess-date dentro de este elemento
+    const sessionsLi = $(element).find('.sessions > li[data-sess-date]');
+    sessionsLi.each((index, sessionElement) => {
+        // Obtener el valor del atributo data-sess-date
+        let sessionDate = $(sessionElement).attr('data-sess-date');
+        sessionDate = new Date(sessionDate).toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric' });
+
+        // Obtener los textos de los links dentro del elemento sess-times y almacenarlos en un array
+        let sessionTimes = $(sessionElement).find('.sess-times a').map((index, timeElement) => $(timeElement).text().trim()).get();
+
+        // Agregar los datos de la sesión al objeto de datos de la película
+        movieData[title][sessionDate] = sessionTimes;
     });
   });
-    // Extraer todos los li directos de la lista ul con clase ".sessions"
-  const sessionsLi = $('.sessions > li');
-
-  // Iterar sobre los li y mostrar su texto en la consola
-  sessionsLi.each((index, element) => {
-    const dataSessDate = $(element).attr('data-sess-date');
-    console.log(dataSessDate);
-  });
-
+ 
   // Cerrar el navegador
   await browser.close();
+
+  peliculasDisponibles = Object.keys(movieData);
+
+  // Dividir las películas en dos columnas
+  const columns = chunkArray(peliculasDisponibles, 2);
+
+  // Función para dividir un array en arrays de tamaño especificado
+  function chunkArray(arr, size) {
+    const chunkedArr = [];
+    for (let i = 0; i < arr.length; i += size) {
+      chunkedArr.push(arr.slice(i, i + size));
+    }
+    return chunkedArr;
+  }
+
+  // Crear los botones en dos columnas
+  const inlineKeyboard = Markup.inlineKeyboard(
+    columns.map(column =>
+      column.map(movie => Markup.button.callback(movie, movie))
+    )
+  );
+
+  // Enviar mensaje con los botones
+  ctx.editMessageText('Selecciona una película:', inlineKeyboard);
 }
-/////
+
 
 const cines = Markup.inlineKeyboard([
   // 1-st column
@@ -94,6 +126,7 @@ bot.start((ctx) => {
 bot.command('cartelera', (ctx) => {
   ctx.reply('¿Qué cine?', cines);
 })
+
 
 bot.action(['aragonia', 'palafox', 'grancasa', 'pvenecia', 'arte7'], async (ctx) => {
   // ctx.match contiene el callback_data del botón presionado
@@ -146,10 +179,10 @@ bot.action(['aragonia', 'palafox', 'grancasa', 'pvenecia', 'arte7'], async (ctx)
 
       break;
     case 'grancasa':
-      ctx.editMessageText('Cinesa (Gran Casa) seleccionado');
+      clickSeeMoreButtons(ctx)
       break;
     case 'pvenecia':
-      clickSeeMoreButtons()
+      clickSeeMoreButtons(ctx)
       break;
     case 'arte7':
       ctx.editMessageText('Arte 7 seleccionado');
@@ -159,47 +192,74 @@ bot.action(['aragonia', 'palafox', 'grancasa', 'pvenecia', 'arte7'], async (ctx)
   }
 });
 
-//Leemos las peliculas con el link
+//Leemos las peliculas con el link para Aragonia y Palafox
 bot.action(/^(?!.*\.html).*$/, async (ctx) => {
-  console.log(ctx)
   const cineSeleccionado = cineSeleccionadoGlobal
-  const URL = `https://www.cinespalafox.com/cartelera/${ctx.match[0]}.html`
-  // OBTENEMOS LOS TITULOS DE LA CARTELERA
-  const response = await axios.get(URL, {
-    httpsAgent: new https.Agent({ rejectUnauthorized: false }) // Desactiva la verificación del certificado
-  });
-  const $ = cheerio.load(response.data);
-  
-  const cineDiv = $(`.sesiones h3:contains("Cines ${cineSeleccionado === "aragonia" ? "aragonia" : "Palafox"}")`).parent();
-  const primerUl = cineDiv.find('ul').first();
+  // Si hay movieData significa que no es palafox o aragonia
+  if (Object.keys(movieData).length > 0) {
+    const peliculaSeleccionada = ctx.match[0];
 
-  const horariosData = {};
-  // Iterar sobre los elementos li dentro de ul
-  primerUl.find('> li').each((index, liElement) => {
-    const fecha = $(liElement).text();
-    // Obtener los textos dentro de los elementos a que están al mismo nivel que li
-    const textos = $(liElement).next('ul').find('li a').map((index, aElement) => $(aElement).text()).get();
+    const horarios = movieData[peliculaSeleccionada];
 
-    horariosData[fecha] = textos;
-  });
+    if (horarios) {
+      // Formatear los horarios como texto
+      const horariosTexto = Object.entries(horarios).map(([fecha, horarios]) => {
+        let renderHorario = ''
+        horarios.forEach((horario) => {
+          renderHorario += `  ·${horario}\n`
+        })
+        return `${fecha}:\n${renderHorario}`
+      }).join('\n')
 
-  let renderHorario = '';
-  renderHorario += `${removeTextSigns(ctx.match[0]).toUpperCase()}\n`
-  if(Object.keys(horariosData).length !== 0){
-    for (const fecha in horariosData) {
-      renderHorario += `${fecha}:\n`;
-      horariosData[fecha].forEach(horario => {
-        renderHorario += `  ·${horario}\n`;
-      });
-      renderHorario += '\n';
+      ctx.editMessageText(`Aqui tienes los horarios para Cines ${cineSeleccionado}`)
+      ctx.reply(`Horarios para ${peliculaSeleccionada.toUpperCase()}\n${horariosTexto}`);
+    } else {
+      ctx.editMessageText(`Lo siento, no hay horarios disponibles para ${peliculaSeleccionada}`);
     }
-  } else {
-    renderHorario += "No hay horarios para este cine"
-  }
+    
+    movieData = {}
 
-  ctx.editMessageText(`Aqui tienes los horarios para Cines ${cineSeleccionado}`)
-  ctx.reply(renderHorario)
+  } else {
+    const URL = `https://www.cinespalafox.com/cartelera/${ctx.match[0]}.html`
+    // OBTENEMOS LOS TITULOS DE LA CARTELERA
+    const response = await axios.get(URL, {
+      httpsAgent: new https.Agent({ rejectUnauthorized: false }) // Desactiva la verificación del certificado
+    });
+    const $ = cheerio.load(response.data);
+    
+    const cineDiv = $(`.sesiones h3:contains("Cines ${cineSeleccionado === "aragonia" ? "aragonia" : "Palafox"}")`).parent();
+    const primerUl = cineDiv.find('ul').first();
+
+    const horariosData = {};
+    // Iterar sobre los elementos li dentro de ul
+    primerUl.find('> li').each((index, liElement) => {
+      const fecha = $(liElement).text();
+      // Obtener los textos dentro de los elementos a que están al mismo nivel que li
+      const textos = $(liElement).next('ul').find('li a').map((index, aElement) => $(aElement).text()).get();
+
+      horariosData[fecha] = textos;
+    });
+
+    let renderHorario = '';
+    renderHorario += `Horarios para ${removeTextSigns(ctx.match[0]).toUpperCase()}\n`
+    if(Object.keys(horariosData).length !== 0){
+      for (const fecha in horariosData) {
+        renderHorario += `${fecha}:\n`;
+        horariosData[fecha].forEach(horario => {
+          renderHorario += `  ·${horario}\n`;
+        });
+        renderHorario += '\n';
+      }
+    } else {
+      renderHorario += "No hay horarios para este cine"
+    }
+
+    ctx.editMessageText(`Aqui tienes los horarios para Cines ${cineSeleccionado}`)
+    ctx.reply(renderHorario)
+  } 
 })
+
+
 
 // Lanzamos el bot
 bot.launch().then(() => {
